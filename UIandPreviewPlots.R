@@ -1,0 +1,34 @@
+library(shiny)
+
+#empty placeholder plot function
+emptyPlot <- function(title) {
+  plot(1, type = "n", xlab = "", ylab = "", main = title, axes = FALSE)
+  box()
+}
+
+#tab names
+plot_names <- c("Violin Plot", "Heatmap", "Feature Plot", "Box & Whiskers Plot", "Bubble Plot")
+
+#UI
+ui <- fluidPage(
+  titlePanel("My Single Cell Data Web App"),
+  
+  do.call(tabsetPanel, lapply(seq_along(plot_names), function(i) {
+    tabPanel(plot_names[i], plotOutput(paste0("plot", i)))
+  }))
+)
+
+#loop to make placeholder plots
+server <- function(input, output) {
+  for (i in seq_along(plot_names)) {
+    local({
+      index <- i  # Lock in i's value
+      output[[paste0("plot", index)]] <- renderPlot({
+        emptyPlot(paste0(plot_names[index], " Placeholder"))
+      })
+    })
+  }
+}
+
+
+shinyApp(ui = ui, server = server)
