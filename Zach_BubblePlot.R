@@ -105,34 +105,49 @@ server <- function(input, output, session) {
     ggplotly(wrap_plots(plots, ncol = 1), tooltip = "text")
   })
   
+  # 2. Bubble Plot (Modified with flipped group/split and bubble annotations)
   output$dotPlot <- renderPlotly({
     req(input$genes, input$group, plot_data())
-    df <- plot_data()
     
-    long_df <- df %>%
-      select(all_of(c("cell", input$genes, input$group, if (input$split != "None") input$split))) %>%
+    # Prepare data
+    df <- plot_data()
+    dot_plot_data <- df %>%
+      select(all_of(c(input$genes, input$group, if (input$split != "None") input$split))) %>%
       pivot_longer(cols = all_of(input$genes), names_to = "gene", values_to = "expression")
     
-    summary_df <- long_df %>%
-      group_by(gene, .data[[input$group]]) %>%
+    # Summarize
+    summary_df <- dot_plot_data %>%
+      group_by(gene, .data[[input$group]], .add = TRUE) %>%
       { if (input$split != "None") group_by(., .data[[input$split]], .add = TRUE) else . } %>%
       summarise(avg_expr = mean(expression), pct_expr = (sum(expression > 0) / n()) * 100, .groups = "drop")
     
-    p <- ggplot(summary_df, aes(x = gene, y = .data[[input$group]], size = pct_expr, color = avg_expr,
-                                text = paste0("Avg Expr: ", round(avg_expr, 2), "<br>% Expr: ", round(pct_expr, 1), "%"))) +
+    # Set up axis aesthetics
+    x_col <- if (input$split != "None") input$split else "all"
+    y_col <- input$group
+    
+    # Plot
+    p <- ggplot(summary_df, aes(x = .data[[x_col]], y = .data[[y_col]], size = pct_expr, color = avg_expr)) +
       geom_point(alpha = 0.8) +
-      scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
-      scale_size_continuous(name = "% Expr.") +
-      labs(x = "Gene", y = "Group") +
-      theme_bw() +
+      geom_text(aes(label = paste0(round(pct_expr, 1), "%")),
+                color = "black", size = 3, vjust = -1, show.legend = FALSE) +
+      scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, name = "Avg. Expr.") +
+      scale_size_continuous(name = "% Expr.", range = c(2, 12)) +
+      labs(x = if (input$split != "None") input$split else "Group", y = input$group, title = "Bubble Plot") +
+      theme_minimal() +
       theme(axis.text.x = element_text(angle = 45, hjust = 1))
     
-    if (input$split != "None") {
-      p <- p + facet_grid(rows = vars(.data[[input$split]]), scales = "free_y", space = "free_y")
-    }
+    # Tooltip
+    p <- p + aes(text = paste0(
+      "Gene: ", summary_df$gene, "<br>",
+      input$group, ": ", summary_df[[input$group]], "<br>",
+      if (input$split != "None") paste0(input$split, ": ", summary_df[[input$split]], "<br>") else "",
+      "Avg. Expr: ", round(summary_df$avg_expr, 2), "<br>",
+      "% Expr: ", round(summary_df$pct_expr, 2), "%"
+    ))
     
     ggplotly(p, tooltip = "text")
   })
+  
   
   output$vlnPlot <- renderPlotly({
     req(input$genes, input$group, plot_data())
