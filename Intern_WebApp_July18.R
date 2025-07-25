@@ -160,37 +160,65 @@ server <- function(input, output, session) {
   output$dotPlot <- renderPlotly({
     req(input$genes, input$group, plot_data())
     df <- plot_data()
-    dot <- df %>%
-      select(all_of(c(input$genes, input$group,
-                      if(input$split!="None") input$split))) %>%
-      pivot_longer(cols = all_of(input$genes), names_to="gene", values_to="expr")
-    summary_df <- dot %>%
-      group_by(gene, .data[[input$group]], .add=TRUE) %>%
-      { if(input$split!="None") group_by(., .data[[input$split]], .add=TRUE) else . } %>%
+    
+    # Use input$split as the group (y-axis)
+    # Use input$group as the facet (split)
+    split_var <- if (input$split != "None") input$split else NULL
+    group_var <- input$group
+    
+    # Create long-format dataframe
+    dot_data <- df %>%
+      select(all_of(c(input$genes, split_var, group_var))) %>%
+      pivot_longer(cols = all_of(input$genes), names_to = "gene", values_to = "expression")
+    
+    # Group and summarize
+    summary_df <- dot_data %>%
+      group_by(gene, .data[[split_var]], .add = TRUE) %>%
+      { if (!is.null(group_var)) group_by(., .data[[group_var]], .add = TRUE) else . } %>%
       summarise(
-        avg_expr = mean(expr),
-        pct_expr = 100 * sum(expr>0)/n(),
-        .groups="drop"
+        avg_expr = mean(expression, na.rm = TRUE),
+        pct_expr = 100 * sum(expression > 0, na.rm = TRUE) / n(),
+        .groups = "drop"
       )
-    xcol <- if(input$split!="None") input$split else input$group
-    ycol <- input$group
-    p <- ggplot(summary_df,
-                aes(x = .data[[xcol]], y = .data[[ycol]],
-                    size = pct_expr, color = avg_expr)) +
-      geom_point(alpha=0.8) +
-      scale_color_gradient2(low="blue", mid="white", high="red", midpoint=0) +
-      scale_size_continuous(range=c(2,12)) +
-      labs(x=xcol, y=ycol, title="Bubble Plot") +
-      theme_minimal() +
-      theme(axis.text.x=element_text(angle=45,hjust=1))
-    p <- p + aes(text=paste0(
-      "Gene: ", gene, "<br>",
-      ycol, ": ", .data[[ycol]], "<br>",
-      if(input$split!="None") paste0(xcol, ": ", .data[[xcol]], "<br>") else "",
-      "Avg Expr: ", round(avg_expr,2), "<br>",
-      "% Expr: ", round(pct_expr,2),"%"
-    ))
-    ggplotly(p, tooltip="text")
+    
+    # Base plot
+    p <- ggplot(summary_df, aes(
+      x = gene,
+      y = .data[[split_var]],
+      size = pct_expr,
+      color = avg_expr,
+      text = paste0(
+        "Gene: ", gene, "<br>",
+        split_var, ": ", .data[[split_var]], "<br>",
+        if (!is.null(group_var)) paste0(group_var, ": ", .data[[group_var]], "<br>") else "",
+        "Avg. Expr: ", round(avg_expr, 2), "<br>",
+        "% Expr: ", round(pct_expr, 1), "%"
+      )
+    )) +
+      geom_point(alpha = 0.9) +
+      geom_text(aes(label = paste0(round(pct_expr, 1), "%")),
+                size = 2.7, vjust = -1.3, color = "black", show.legend = FALSE) +
+      scale_color_viridis_c(name = "Avg. Expr.") +
+      scale_size_continuous(name = "% Expr.", range = c(2, 10)) +
+      labs(
+        title = "Gene Expression Bubble Plot",
+        x = "Gene",
+        y = split_var
+      ) +
+      theme_minimal(base_size = 13) +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5)
+      )
+    
+    # Facet by the original "Group By" if applicable
+    if (!is.null(group_var)) {
+      p <- p + facet_wrap(vars(.data[[group_var]]), ncol = 1)
+    }
+    
+    ggplotly(p, tooltip = "text") %>% layout(legend = list(orientation = "h", y = -0.2))
   })
   # === BUBBLE PLOT SECTION END ===
   
