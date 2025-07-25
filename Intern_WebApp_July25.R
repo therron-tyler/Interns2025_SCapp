@@ -338,22 +338,37 @@ server <- function(input, output, session) {
   output$heatmapPlot <- renderPlotly({
     req(input$genes, input$group, plot_data())
     df <- plot_data()
-    grp <- df[[input$group]]
-    if(input$split!="None") grp <- paste(df[[input$split]],grp,sep="_")
+    
+    # Updated grouping logic: CellType first, Disease second
+    if (input$split != "None") {
+      grp <- paste(df[[input$group]], df[[input$split]], sep = "_")
+    } else {
+      grp <- df[[input$group]]
+    }
+    
     mat <- as.matrix(df[input$genes])
-    avg_mat <- t(rowsum(mat, grp)/as.vector(table(grp)))
-    mat_z <- t(scale(t(avg_mat))); mat_z[is.na(mat_z)]<-0
+    avg_mat <- t(rowsum(mat, grp) / as.vector(table(grp)))
+    
+    mat_z <- t(scale(t(avg_mat)))
+    mat_z[is.na(mat_z)] <- 0
+    
     plot_ly(
-      x=colnames(mat_z), y=rownames(mat_z), z=mat_z,
-      type="heatmap",
-      colors=colorRamp(c("#440154","white","#21918c")),
-      showscale=TRUE
+      x = colnames(mat_z),
+      y = rownames(mat_z),
+      z = mat_z,
+      type = "heatmap",
+      colors = colorRamp(c("#440154", "white", "#21918c")),
+      showscale = TRUE
     ) %>%
       layout(
-        title="Expression Heatmap",
-        xaxis=list(title="Group",tickangle=45),
-        yaxis=list(title="Gene"),
-        margin=list(l=80,r=20,b=80,t=50)
+        title = list(
+          text = "Expression Heatmap<br><sub>Each group = CellType_DiseaseStatus</sub>",
+          x = 0.5,
+          xanchor = "center"
+        ),
+        xaxis = list(title = "Group", tickangle = 45),
+        yaxis = list(title = "Gene"),
+        margin = list(l = 80, r = 20, b = 100, t = 80)
       )
   })
   # === HEATMAP SECTION END ===
