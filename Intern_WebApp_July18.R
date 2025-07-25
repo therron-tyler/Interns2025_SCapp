@@ -225,7 +225,7 @@ server <- function(input, output, session) {
       labs(x=input$group, y="Expression")
     if(input$split!="None") {
       p <- p + aes(fill=.data[[input$split]]) +
-        theme(legend.position="top")``
+        theme(legend.position="top")
     }
     ggplotly(p)
   })
