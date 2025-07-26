@@ -10,10 +10,11 @@ library(tidyr)
 library(readr)
 library(ggplot2)
 library(plotly)
-library(patchwork)
+library(patchwork) # Used for combining plots
 library(RColorBrewer)
-library(data.table) # Added for enhanced violin plot
-library(shinycssloaders) # <--- ADD THIS LINE
+library(data.table)
+library(shinycssloaders)
+library(htmlwidgets) # <-- ADD THIS LINE for saving HTML plots
 
 
 # Increase upload limit
@@ -26,7 +27,7 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       fileInput("expr", "1. Expression Matrix (.tsv or .tsv.gz)", accept = c(".tsv", ".tsv.gz")),
-      fileInput("meta", "2. Metadata File (.tsv or .tsv.gz)",      accept = c(".tsv", ".tsv.gz")),
+      fileInput("meta", "2. Metadata File (.tsv or .tsv.gz)",   accept = c(".tsv", ".tsv.gz")),
       hr(),
       uiOutput("gene_ui"),      # Gene selector
       uiOutput("group_ui"),     # Group-by selector
@@ -34,15 +35,24 @@ ui <- fluidPage(
       checkboxInput("color_by_gene",
                     "Feature Plot: Color by gene expression",
                     value = FALSE),
-      p(strong("Note:"), "For Violin/Box plots, multiple genes will be shown in a grid.")
+      p(strong("Note:"), "For Violin/Box plots, multiple genes will be shown in a grid."),
+      
+      # --- NEW: Download Center UI ---
+      hr(),
+      wellPanel(
+        h4("Download Center"),
+        p("Generate and download the combined UMAP feature plots below."),
+        downloadButton("downloadPng", "Download as PNG", icon = icon("download")),
+        downloadButton("downloadHtml", "Download as HTML", icon = icon("download"))
+      )
     ),
     mainPanel(
       tabsetPanel(
-        tabPanel("Feature Plot", plotlyOutput("featPlot", height = "600px")),
-        tabPanel("Bubble Plot",  plotlyOutput("dotPlot",   height = "800px")),
-        tabPanel("Violin Plot",  withSpinner(uiOutput("vlnPlot_ui"), type = 6)), # Updated for dynamic height and spinner
-        tabPanel("Heatmap",      plotlyOutput("heatmapPlot",height = "800px")),
-        tabPanel("Box Plot",     plotlyOutput("boxPlot",   height = "800px"))
+        tabPanel("Feature Plot", withSpinner(plotlyOutput("featPlot", height = "900px"), type = 6)),
+        tabPanel("Bubble Plot",  plotlyOutput("dotPlot",     height = "800px")),
+        tabPanel("Violin Plot",  withSpinner(uiOutput("vlnPlot_ui"), type = 6)),
+        tabPanel("Heatmap",      plotlyOutput("heatmapPlot", height = "800px")),
+        tabPanel("Box Plot",     plotlyOutput("boxPlot",     height = "800px"))
       )
     )
   )
@@ -50,9 +60,8 @@ ui <- fluidPage(
 
 # --- SERVER LOGIC -----------------------------------------------------------
 server <- function(input, output, session) {
-  
+
   # 1) Load and merge expression + metadata -------------------------------
-  # This reactive now primarily loads data for plots that don't need the full data.table processing
   plot_data <- reactive({
     req(input$expr, input$meta)
     meta_df <- read_tsv(input$meta$datapath, show_col_types = FALSE) %>%
@@ -63,17 +72,15 @@ server <- function(input, output, session) {
     df    <- t(mat) %>% as.data.frame() %>% tibble::rownames_to_column("cell")
     bind_cols(df, meta_df[df$cell, , drop = FALSE])
   })
-  
-  # Data for the enhanced Violin Plot (using data.table for efficiency)
+
   expr_dt_full <- reactive({
     req(input$expr)
     dt <- fread(input$expr$datapath, encoding = "UTF-8")
     setnames(dt, names(dt)[1], "gene")
-    # Clean gene names once when loading the file
     dt[, gene := toupper(trimws(gene))]
     dt
   })
-  
+
   meta_dt_full <- reactive({
     req(input$meta)
     dt <- fread(input$meta$datapath)
@@ -81,97 +88,230 @@ server <- function(input, output, session) {
     dt[, cell := trimws(as.character(cell))]
     dt
   })
-  
+
   # 2) Dynamic UI for gene, group, split ----------------------------------
   output$gene_ui <- renderUI({
-    req(expr_dt_full()) # Use data.table reactive for gene choices
+    req(expr_dt_full())
     gene_choices <- unique(expr_dt_full()$gene)
     selectizeInput("genes", "Select Gene(s):",
-                   choices  = NULL, # Set to NULL and update via observeEvent
+                   choices  = NULL,
                    selected = NULL,
                    multiple = TRUE,
                    options = list(placeholder = "Type to search...", maxOptions = 100))
   })
-  
-  # Update gene choices using observeEvent for selectizeInput
+
   observeEvent(expr_dt_full(), {
     updateSelectizeInput(session, "genes",
                          choices = unique(expr_dt_full()$gene),
                          selected = NULL,
                          server = TRUE)
   })
-  
+
   output$group_ui <- renderUI({
-    req(meta_dt_full()) # Use data.table reactive for metadata columns
+    req(meta_dt_full())
     meta_cols <- setdiff(names(meta_dt_full()), "cell")
     selectInput("group", "Group By (Categories/Colors):",
                 choices  = meta_cols,
                 selected = meta_cols[1])
   })
   output$split_ui <- renderUI({
-    req(meta_dt_full()) # Use data.table reactive for metadata columns
+    req(meta_dt_full())
     meta_cols <- setdiff(names(meta_dt_full()), "cell")
     selectInput("split", "Split By (Rows/Panels):",
                 choices  = c("None", meta_cols),
                 selected = "None")
   })
+
+  # === FEATURE PLOT SECTION START (RESTRUCTURED FOR DOWNLOADS) ===
   
-  # === FEATURE PLOT SECTION START ===
-  output$featPlot <- renderPlotly({
-    req(plot_data(), "UMAP_Xaxis" %in% names(plot_data()), input$group)
-    df <- plot_data()
-    if (!input$color_by_gene) {
-      p <- ggplot(df,
-                  aes(x = UMAP_Xaxis, y = UMAP_Yaxis,
-                      color = .data[[input$group]],
-                      text = paste0("Cell: ", cell, "<br>Group: ", .data[[input$group]]))) +
-        geom_point(size = 1, alpha = 0.8) +
-        guides(color = guide_legend(override.aes = list(size = 3))) +
-        labs(title = "UMAP Colored by Metadata Group", color = input$group) +
-        theme_minimal()
-    } else {
-      req(input$genes)
-      if (length(input$genes) == 1) {
-        p <- ggplot(df,
-                    aes(x = UMAP_Xaxis, y = UMAP_Yaxis,
-                        color = .data[[input$genes]],
-                        text  = paste0("Cell: ", cell, "<br>Expr: ", round(.data[[input$genes]],2)))) +
-          geom_point(size = 1, alpha = 0.8) +
-          scale_color_viridis_c() +
-          labs(title = paste("Expression of", input$genes), color = "Expression") +
-          theme_minimal()
-      } else {
-        df$ModuleScore <- rowMeans(df[, input$genes, drop = FALSE], na.rm = TRUE)
-        p <- ggplot(df,
-                    aes(x = UMAP_Xaxis, y = UMAP_Yaxis,
-                        color = ModuleScore,
-                        text  = paste0("Cell: ", cell, "<br>Score: ", round(ModuleScore,2)))) +
-          geom_point(size = 1, alpha = 0.8) +
-          scale_color_viridis_c() +
-          labs(title = "Module Score for Selected Genes", color = "Avg. Expr.") +
-          theme_minimal()
+  # --- NEW: Reactive ggplot object for sharing ---
+  # This reactive builds the ggplot object, which can then be used by both
+  # the renderPlotly output and the download handlers.
+  feature_plot_object <- reactive({
+      # Ensure base data and UMAP coordinates are available
+      req(plot_data(), "UMAP_Xaxis" %in% names(plot_data()), input$group)
+      df <- plot_data()
+
+      # Prepare enhanced hover text based on user selections
+      if (!is.null(input$genes) && length(input$genes) > 0) {
+          if (length(input$genes) == 1) { # Case for a SINGLE selected gene
+              gene <- input$genes[1]
+              summary_stats <- df %>%
+                  group_by(.data[[input$group]]) %>%
+                  summarise(
+                      avg_expr = mean(.data[[gene]], na.rm = TRUE),
+                      pct_expr = 100 * sum(.data[[gene]] > 0, na.rm = TRUE) / n(),
+                      .groups = "drop"
+                  )
+              df <- left_join(df, summary_stats, by = input$group)
+              df$hover_text <- paste0(
+                  "<b>Cell:</b> ", df$cell, "<br>",
+                  "<b>Group:</b> ", df[[input$group]], "<br>",
+                  #"<hr>", # Adds a horizontal line
+                  "<b>Gene:</b> ", gene, "<br>",
+                  "<b>Expression (this cell):</b> ", round(df[[gene]], 2), "<br>",
+                  "<b>Avg. Expr (group):</b> ", round(df$avg_expr, 2), "<br>",
+                  "<b>% Expressing (group):</b> ", round(df$pct_expr, 1), "%"
+              )
+          } else { # Case for MULTIPLE selected genes (Module Score)
+              df$ModuleScore <- rowMeans(df[, input$genes, drop = FALSE], na.rm = TRUE)
+              summary_stats <- df %>%
+                  group_by(.data[[input$group]]) %>%
+                  summarise(avg_score = mean(ModuleScore, na.rm = TRUE), .groups = "drop")
+              df <- left_join(df, summary_stats, by = input$group)
+              df$hover_text <- paste0(
+                  "<b>Cell:</b> ", df$cell, "<br>",
+                  "<b>Group:</b> ", df[[input$group]], "<br>",
+                  "<hr>",
+                  "<b>Module Score (this cell):</b> ", round(df$ModuleScore, 2), "<br>",
+                  "<b>Avg. Score (group):</b> ", round(df$avg_score, 2)
+              )
+          }
+      } else { # Case for NO genes selected
+          df$hover_text <- paste0("<b>Cell:</b> ", df$cell, "<br><b>Group:</b> ", df[[input$group]])
       }
-    }
-    ggplotly(p, tooltip = "text")
+
+
+      # --- Case 1: Color by Metadata ---
+      if (!input$color_by_gene) {
+          p <- ggplot(df, aes(x = UMAP_Xaxis, y = UMAP_Yaxis, color = .data[[input$group]], text = hover_text)) +
+              geom_point(size = 1, alpha = 0.8) +
+              guides(color = guide_legend(override.aes = list(size = 3))) +
+              labs(title = "UMAP Colored by Metadata Group", color = input$group) +
+              theme_minimal() +
+              theme(legend.title = element_text(size = 10), legend.text = element_text(size = 8))
+          return(p)
+      }
+
+      # --- Case 2: Color by Gene Expression ---
+      req(input$genes)
+
+      # --- Subcase 2a: NO Splitting ---
+      if (input$split == "None") {
+          if (length(input$genes) == 1) {
+              p <- ggplot(df, aes(x = UMAP_Xaxis, y = UMAP_Yaxis, color = .data[[input$genes]], text = hover_text)) +
+                  geom_point(size = 1, alpha = 0.8) +
+                  scale_color_gradient(low = "lightgrey", high = "darkviolet") +
+                  labs(title = paste("Expression of", input$genes), color = "Expression") +
+                  theme_minimal()
+          } else {
+              p <- ggplot(df, aes(x = UMAP_Xaxis, y = UMAP_Yaxis, color = ModuleScore, text = hover_text)) +
+                  geom_point(size = 1, alpha = 0.8) +
+                  scale_color_gradient(low = "lightgrey", high = "darkviolet") +
+                  labs(title = "Module Score for Selected Genes", color = "Avg. Expr.") +
+                  theme_minimal()
+          }
+          return(p)
+      }
+
+      # --- Subcase 2b: WITH Splitting ---
+      p_meta <- ggplot(df, aes(x = UMAP_Xaxis, y = UMAP_Yaxis, color = .data[[input$group]], text = hover_text)) +
+          geom_point(size = 1.5, alpha = 0.9) +
+          guides(color = guide_legend(override.aes = list(size = 4))) +
+          labs(title = paste("UMAP grouped by", input$group), color = input$group) +
+          theme_minimal()
+
+      df_long <- df %>%
+          select(UMAP_Xaxis, UMAP_Yaxis, cell, all_of(input$group), all_of(input$split), all_of(input$genes)) %>%
+          pivot_longer(
+              cols = all_of(input$genes),
+              names_to = "gene",
+              values_to = "expression"
+          )
+
+      summary_split <- df_long %>%
+          group_by(gene, .data[[input$split]]) %>%
+          summarise(
+              avg_expr_split = mean(expression, na.rm = TRUE),
+              pct_expr_split = 100 * sum(expression > 0, na.rm = TRUE) / n(),
+              .groups = "drop"
+          )
+      df_long <- left_join(df_long, summary_split, by = c("gene", input$split))
+      
+      df_long$hover_text_split <- paste0(
+          "<b>Cell:</b> ", df_long$cell, "<br>",
+          "<b>Group:</b> ", df_long[[input$group]], "<br>",
+          "<b>", input$split, ":</b> ", df_long[[input$split]], "<br>",
+          "<hr>",
+          "<b>Gene:</b> ", df_long$gene, "<br>",
+          "<b>Expression (this cell):</b> ", round(df_long$expression, 2), "<br>",
+          "<b>Avg. Expr (this panel):</b> ", round(df_long$avg_expr_split, 2), "<br>",
+          "<b>% Expressing (this panel):</b> ", round(df_long$pct_expr_split, 1), "%"
+      )
+
+      df_bg <- df_long %>% distinct(UMAP_Xaxis, UMAP_Yaxis, .data[[input$split]], gene)
+
+      # --- FIX: Moved the `text` aesthetic from the main ggplot call to the specific geom_point layer ---
+      p_split_feat <- ggplot(df_long, aes(x = UMAP_Xaxis, y = UMAP_Yaxis)) +
+          geom_point(data = df_bg, color = "grey90", size = 0.5, alpha = 0.5) +
+          geom_point(data = filter(df_long, expression > 0), aes(color = expression, text = hover_text_split), size = 0.8) +
+          scale_color_gradient(low = "lightgrey", high = "darkviolet") +
+          facet_grid(
+              rows = vars(.data[[input$split]]),
+              cols = vars(gene)
+          ) +
+          labs(x = NULL, y = NULL, color = "Expression") +
+          theme_void() +
+          theme(
+              strip.text.x = element_text(size = 12, face = "bold"),
+              strip.text.y = element_text(size = 12, face = "bold", angle = 0),
+              panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+              legend.position = "bottom"
+          )
+
+      combined_plot <- p_meta / p_split_feat +
+                       plot_layout(heights = c(1, length(unique(df[[input$split]]))))
+
+      return(combined_plot)
   })
-  # === FEATURE PLOT SECTION END ===
+
+  # Render the plotly object for the UI
+  output$featPlot <- renderPlotly({
+      plot_gg <- feature_plot_object()
+      req(plot_gg)
+      ggplotly(plot_gg, tooltip = "text")
+  })
   
+  # --- NEW: Download Handlers ---
+  output$downloadPng <- downloadHandler(
+    filename = function() {
+      paste0("feature_plot_", Sys.Date(), ".png")
+    },
+    content = function(file) {
+      plot_to_save <- feature_plot_object()
+      req(plot_to_save)
+      # Use ggsave for high-quality export. Adjust dimensions as needed.
+      ggsave(file, plot = plot_to_save, device = "png", width = 10, height = 12, dpi = 300, units = "in")
+    }
+  )
+  
+  output$downloadHtml <- downloadHandler(
+    filename = function() {
+      paste0("feature_plot_", Sys.Date(), ".html")
+    },
+    content = function(file) {
+      plot_gg <- feature_plot_object()
+      req(plot_gg)
+      # Convert to plotly and then save as a self-contained HTML file
+      plot_ly <- ggplotly(plot_gg, tooltip = "text")
+      saveWidget(widget = plot_ly, file = file, selfcontained = TRUE)
+    }
+  )
+  
+  # === FEATURE PLOT SECTION END ===
+
   # === BUBBLE PLOT SECTION START ===
   output$dotPlot <- renderPlotly({
     req(input$genes, input$group, plot_data())
     df <- plot_data()
     
-    # Use input$split as the group (y-axis)
-    # Use input$group as the facet (split)
     split_var <- if (input$split != "None") input$split else NULL
     group_var <- input$group
     
-    # Create long-format dataframe
     dot_data <- df %>%
       select(all_of(c(input$genes, split_var, group_var))) %>%
       pivot_longer(cols = all_of(input$genes), names_to = "gene", values_to = "expression")
     
-    # Group and summarize
     summary_df <- dot_data %>%
       group_by(gene, .data[[split_var]], .add = TRUE) %>%
       { if (!is.null(group_var)) group_by(., .data[[group_var]], .add = TRUE) else . } %>%
@@ -181,7 +321,6 @@ server <- function(input, output, session) {
         .groups = "drop"
       )
     
-    # Base plot
     p <- ggplot(summary_df, aes(
       x = gene,
       y = .data[[split_var]],
@@ -213,7 +352,6 @@ server <- function(input, output, session) {
         plot.title = element_text(face = "bold", hjust = 0.5)
       )
     
-    # Facet by the original "Group By" if applicable
     if (!is.null(group_var)) {
       p <- p + facet_wrap(vars(.data[[group_var]]), ncol = 1)
     }
@@ -221,24 +359,21 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = "text") %>% layout(legend = list(orientation = "h", y = -0.2))
   })
   # === BUBBLE PLOT SECTION END ===
-  
+
   # === VIOLIN PLOT SECTION START (Updated) ===
-  # Dynamic plot container for Violin Plot
   output$vlnPlot_ui <- renderUI({
     req(input$genes)
     n    <- length(input$genes)
-    # Adjust columns based on number of genes, max 2 columns for better readability
     cols <- if (n <= 2) n else 2
     rows <- ceiling(n/cols)
-    height_px <- paste0(400*rows, "px") # Adjust height dynamically
+    height_px <- paste0(400*rows, "px")
     plotlyOutput("vlnPlot", height = height_px, width = "100%")
   })
-  
-  # Build and render violin plot
+
   output$vlnPlot <- renderPlotly({
     req(input$genes, input$group, expr_dt_full(), meta_dt_full())
     
-    genes_selected <- toupper(trimws(input$genes)) # Clean selected gene names
+    genes_selected <- toupper(trimws(input$genes))
     grp_col <- input$group
     spl_col <- input$split
     n_genes <- length(genes_selected)
@@ -259,7 +394,7 @@ server <- function(input, output, session) {
                       variable.name = "cell",
                       value.name = "expression",
                       variable.factor = FALSE)
-      df_long[, cell := trimws(as.character(cell))] # Clean cell names
+      df_long[, cell := trimws(as.character(cell))]
       
       df <- merge(df_long, meta_dt_full(), by = "cell", all = FALSE)
       
@@ -333,13 +468,12 @@ server <- function(input, output, session) {
     })
   })
   # === VIOLIN PLOT SECTION END ===
-  
+
   # === HEATMAP SECTION START ===
   output$heatmapPlot <- renderPlotly({
     req(input$genes, input$group, plot_data())
     df <- plot_data()
     
-    # Updated grouping logic: CellType first, Disease second
     if (input$split != "None") {
       grp <- paste(df[[input$group]], df[[input$split]], sep = "_")
     } else {
@@ -372,7 +506,7 @@ server <- function(input, output, session) {
       )
   })
   # === HEATMAP SECTION END ===
-  
+
   # === BOX PLOT SECTION START ===
   output$boxPlot <- renderPlotly({
     req(input$genes, input$group, plot_data())
