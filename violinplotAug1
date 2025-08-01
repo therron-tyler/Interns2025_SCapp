@@ -1,0 +1,200 @@
+#–––– Increase upload limit –––––
+options(shiny.maxRequestSize = 600 * 1024^2)
+install.packages("colorspace")
+
+#–––– Packages –––––
+library(shiny)
+library(data.table)
+library(ggplot2)
+library(viridis)
+library(shinycssloaders)
+library(plotly)
+library(RColorBrewer)
+library(colorspace)
+
+#–––– UI –––––
+ui <- fluidPage(
+  titlePanel("Single-cell Violin Plot Explorer (Interactive)"),
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("expr", "Expression matrix (.tsv)", accept = ".tsv"),
+      fileInput("meta", "Metadata (.tsv)", accept = ".tsv"),
+      hr(),
+      selectizeInput("genes", "Select gene(s):",
+                     choices = NULL, multiple = TRUE,
+                     options = list(placeholder = "Type to search…",
+                                    maxOptions = 100)),
+      selectInput("group", "Group by (required):", choices = NULL),
+      selectInput("split_by", "Split by (optional):", choices = NULL)
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Violin Plot",
+                 withSpinner(uiOutput("vlnPlot_ui"), type = 6)
+        )
+      )
+    )
+  )
+)
+
+#–––– Server –––––
+server <- function(input, output, session) {
+  
+  #–––– Helper Function ––––
+  get_colors <- function(n) {
+    if (n <= 8) {
+      brewer.pal(n, "Pastel1")
+    } else if (n <= 12) {
+      brewer.pal(n, "Set3")
+    } else {
+      qualitative_hcl(n, palette = "Pastel 1")
+    }
+  }
+  
+  # 1) First column (genes) for dropdown
+  expr_genes <- reactive({
+    req(input$expr)
+    fread(input$expr$datapath, select = 1)[[1]]
+  })
+  
+  # 2) Metadata
+  meta_dt <- reactive({
+    req(input$meta)
+    dt <- fread(input$meta$datapath)
+    setnames(dt, names(dt)[1], "cell")
+    dt
+  })
+  
+  # 3) Populate gene & meta selectors
+  observeEvent(expr_genes(), {
+    updateSelectizeInput(session, "genes",
+                         choices = expr_genes(),
+                         selected = NULL,
+                         server = TRUE)
+  })
+  observeEvent(meta_dt(), {
+    cols <- setdiff(names(meta_dt()), "cell")
+    updateSelectInput(session, "group", choices = cols, selected = NULL)
+    updateSelectInput(session, "split_by", choices = c(None = "", cols), selected = "")
+  })
+  
+  # 4) Dynamic-height UI container for plotlyOutput
+  output$vlnPlot_ui <- renderUI({
+    req(input$genes)
+    n <- length(input$genes)
+    cols <- if (n <= 2) n else 2
+    rows <- ceiling(n / cols)
+    height_px <- paste0(400 * rows, "px")
+    plotlyOutput("vlnPlot", height = height_px, width = "100%")
+  })
+  
+  # 5) Build & render the interactive violin plot
+  output$vlnPlot <- renderPlotly({
+    req(input$expr, input$meta, input$genes, input$group)
+    
+    path <- input$expr$datapath
+    genes <- input$genes
+    meta <- meta_dt()
+    grp <- input$group
+    spl <- input$split_by
+    n_genes <- length(genes)
+    ncol_wrap <- if (n_genes <= 2) n_genes else 2
+    
+    withProgress(message = "Building violin(s)…", value = 0, {
+      
+      incProgress(0.25, detail = "Reading expression data...")
+      expr_dt <- fread(path)
+      setnames(expr_dt, names(expr_dt)[1], "gene")
+      dt_s <- expr_dt[gene %in% genes]
+      
+      if (nrow(dt_s) == 0) {
+        showNotification("Selected genes not found in the expression matrix.", type = "error")
+        return(NULL)
+      }
+      
+      incProgress(0.1, detail = "Melting to long form")
+      df_long <- melt(dt_s,
+                      id.vars = "gene",
+                      variable.name = "cell",
+                      value.name = "expression",
+                      variable.factor = FALSE)
+      
+      incProgress(0.1, detail = "Joining metadata")
+      df <- merge(df_long, meta, by = "cell", all = FALSE)
+      df[, group := factor(get(grp))]
+      if (nzchar(spl)) df[, split := factor(get(spl))] else df[, split := NULL]
+      
+      meta_cols <- setdiff(names(meta), "cell")
+      df[, tooltip_text := {
+        meta_info <- sapply(meta_cols, function(col) paste0(col, ": ", get(col)))
+        paste(c(
+          paste("Cell:", cell),
+          paste0("Expression: ", round(expression, 3)),
+          meta_info
+        ), collapse = "<br>")
+      }, by = seq_len(nrow(df))]
+      
+      incProgress(0.1, detail = "Filtering for densities")
+      if (nzchar(spl)) {
+        cnts <- df[, .N, by = .(gene, group, split)]
+        keep <- cnts[N >= 2, .(gene, group, split)]
+        df_big <- merge(df, keep, by = c("gene", "group", "split"))
+      } else {
+        cnts <- df[, .N, by = .(gene, group)]
+        keep <- cnts[N >= 2, .(gene, group)]
+        df_big <- merge(df, keep, by = c("gene", "group"))
+      }
+      
+      incProgress(0.2, detail = "Rendering plot")
+      
+      # Generate appropriate number of distinct pastel colors
+      n_groups <- if (nzchar(spl)) length(unique(df_big$split)) else length(unique(df_big$group))
+      pastel_colors <- get_colors(n_groups)
+      
+      if (nzchar(spl)) {
+        p <- ggplot(df_big,
+                    aes(x = group, y = expression,
+                        fill = split, group = interaction(group, split),
+                        text = tooltip_text)) +
+          geom_violin(trim = TRUE, color = "black", alpha = 0.6) +
+          geom_jitter(aes(color = split),
+                      position = position_jitterdodge(0.9, 0.15),
+                      size = 0.6, alpha = 0.6) +
+          scale_fill_manual(name = spl, values = pastel_colors) +
+          scale_color_manual(values = pastel_colors, guide = "none")
+      } else {
+        p <- ggplot(df_big,
+                    aes(x = group, y = expression,
+                        fill = group, group = group,
+                        text = tooltip_text)) +
+          geom_violin(trim = TRUE, color = "black", alpha = 0.6) +
+          geom_jitter(aes(color = group),
+                      position = position_jitter(0.15),
+                      size = 0.6, alpha = 0.6) +
+          scale_fill_manual(values = pastel_colors, guide = "none") +
+          scale_color_manual(values = pastel_colors, guide = "none")
+      }
+      
+      p <- p +
+        facet_wrap(~ gene, scales = "free_y",
+                   ncol = ncol_wrap, drop = FALSE) +
+        labs(x = NULL, y = "Normalized Expression") +
+        theme_minimal() +
+        theme(
+          panel.spacing = unit(1, "cm"),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          strip.text = element_text(size = 12),
+          plot.margin = margin(10, 10, 10, 10)
+        )
+      
+      ggplotly(p, tooltip = "text") %>%
+        layout(
+          margin = list(b = 150),
+          legend = list(orientation = "h", y = -0.2, x = 0.5, xanchor = "center")
+        )
+    })
+  })
+}
+
+#–––– Launch App –––––
+shinyApp(ui, server)
