@@ -19,7 +19,7 @@ library(colorspace)
 
 
 # Increase upload limit
-options(shiny.maxRequestSize = 600 * 1024^2)
+options(shiny.maxRequestSize = 10000 * 1024^2)
 Sys.setenv("VROOM_CONNECTION_SIZE" = 10000000)
 
 # --- UI DEFINITION -----------------------------------------------------------
