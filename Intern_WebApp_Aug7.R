@@ -361,8 +361,8 @@ server <- function(input, output, session) {
   })
   # === BUBBLE PLOT SECTION END ===
 
-  # === VIOLIN PLOT SECTION START (Enhanced) ===
-  
+   # === VIOLIN PLOT SECTION START (Enhanced and Corrected) ===
+
   # Helper function for better colors
   get_colors <- function(n) {
     if (n <= 8) {
@@ -373,7 +373,7 @@ server <- function(input, output, session) {
       qualitative_hcl(n, palette = "Pastel 1")
     }
   }
-  
+
   output$vlnPlot_ui <- renderUI({
     req(input$genes)
     n    <- length(input$genes)
@@ -385,22 +385,22 @@ server <- function(input, output, session) {
 
   output$vlnPlot <- renderPlotly({
     req(input$genes, input$group, expr_dt_full(), meta_dt_full())
-    
+
     genes_selected <- toupper(trimws(input$genes))
     grp_col <- input$group
     spl_col <- input$split
     n_genes <- length(genes_selected)
     ncol_wrap <- if (n_genes <= 2) n_genes else 2
-    
+
     withProgress(message = "Building violin plot(s)…", value = 0, {
       incProgress(0.25, detail = "Reading expression data...")
       dt_s <- expr_dt_full()[gene %in% genes_selected]
-      
+
       if (nrow(dt_s) == 0) {
         showNotification("Selected genes not found in the expression matrix.", type = "error")
         return(NULL)
       }
-      
+
       incProgress(0.1, detail = "Melting to long form")
       df_long <- melt(dt_s,
                       id.vars = "gene",
@@ -408,22 +408,22 @@ server <- function(input, output, session) {
                       value.name = "expression",
                       variable.factor = FALSE)
       df_long[, cell := trimws(as.character(cell))]
-      
+
       incProgress(0.1, detail = "Joining metadata")
       df <- merge(df_long, meta_dt_full(), by = "cell", all = FALSE)
-      
+
       if (nrow(df) == 0) {
         showNotification("No matching cells between expression and metadata.", type = "error")
         return(NULL)
       }
-      
+
       df[, group := factor(get(grp_col))]
       if (spl_col != "None" && nzchar(spl_col)) {
         df[, split := factor(get(spl_col))]
       } else {
         df[, split := NULL]
       }
-      
+
       # Enhanced tooltip creation with metadata
       meta_cols <- setdiff(names(meta_dt_full()), "cell")
       df[, tooltip_text := {
@@ -434,7 +434,7 @@ server <- function(input, output, session) {
           meta_info
         ), collapse = "<br>")
       }, by = seq_len(nrow(df))]
-      
+
       incProgress(0.1, detail = "Filtering for densities")
       if (spl_col != "None" && nzchar(spl_col)) {
         cnts <- df[, .N, by = .(gene, group, split)]
@@ -445,31 +445,32 @@ server <- function(input, output, session) {
         keep <- cnts[N >= 2, .(gene, group)]
         df_big <- merge(df, keep, by = c("gene", "group"))
       }
-      
+
       if (nrow(df_big) == 0) {
         showNotification("No groups have ≥2 cells after filtering. Try different settings.", type = "error")
         return(NULL)
       }
-      
+
       incProgress(0.2, detail = "Rendering plot")
-      
-      # Generate appropriate number of distinct pastel colors
+
       n_groups <- if (spl_col != "None" && nzchar(spl_col)) {
         length(unique(df_big$split))
       } else {
         length(unique(df_big$group))
       }
       pastel_colors <- get_colors(n_groups)
-      
+
       if (spl_col != "None" && nzchar(spl_col)) {
         p <- ggplot(df_big,
                     aes(x = group, y = expression,
                         fill = split, group = interaction(group, split),
                         text = tooltip_text)) +
-          geom_violin(trim = TRUE, color = "black", alpha = 0.6) +
+          # Draw jitter points FIRST
           geom_jitter(aes(color = split),
                       position = position_jitterdodge(0.9, 0.15),
                       size = 0.6, alpha = 0.6) +
+          # Draw semi-transparent violin SECOND, so outline is on top
+          geom_violin(trim = TRUE, color = "black", alpha = 0.6) +
           scale_fill_manual(name = spl_col, values = pastel_colors) +
           scale_color_manual(values = pastel_colors, guide = "none")
       } else {
@@ -477,14 +478,16 @@ server <- function(input, output, session) {
                     aes(x = group, y = expression,
                         fill = group, group = group,
                         text = tooltip_text)) +
-          geom_violin(trim = TRUE, color = "black", alpha = 0.6) +
+          # Draw jitter points FIRST
           geom_jitter(aes(color = group),
                       position = position_jitter(0.15),
                       size = 0.6, alpha = 0.6) +
+          # Draw semi-transparent violin SECOND, so outline is on top
+          geom_violin(trim = TRUE, color = "black", alpha = 0.6) +
           scale_fill_manual(values = pastel_colors, guide = "none") +
           scale_color_manual(values = pastel_colors, guide = "none")
       }
-      
+
       p <- p +
         facet_wrap(~ gene, scales = "free_y",
                    ncol = ncol_wrap, drop = FALSE) +
@@ -494,13 +497,13 @@ server <- function(input, output, session) {
           panel.spacing = unit(1, "cm"),
           axis.text.x = element_text(angle = 45, hjust = 1),
           strip.text = element_text(size = 12),
-          plot.margin = margin(10, 10, 10, 10)
+          plot.margin = margin(10, 10, 10, 10),
+          legend.position = "bottom"
         )
-      
+
       ggplotly(p, tooltip = "text") %>%
         layout(
-          margin = list(b = 150),
-          legend = list(orientation = "h", y = -0.2, x = 0.5, xanchor = "center")
+          margin = list(b = 150)
         )
     })
   })
